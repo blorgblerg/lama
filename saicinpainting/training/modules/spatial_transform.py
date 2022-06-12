@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,7 +15,7 @@ class LearnableSpatialTransformWrapper(nn.Module):
             self.angle = nn.Parameter(self.angle, requires_grad=True)
         self.pad_coef = pad_coef
 
-    def forward(self, x):
+    def forward(self, x: Tuple[torch.Tensor]):
         if torch.is_tensor(x):
             return self.inverse_transform(self.impl(self.transform(x)), x)
         elif isinstance(x, tuple):

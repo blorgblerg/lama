@@ -1,6 +1,7 @@
 # Fast Fourier Convolution NeurIPS 2020
 # original implementation https://github.com/pkumivision/FFC/blob/main/model_zoo/ffc.py
 # paper https://proceedings.neurips.cc/paper/2020/file/2fd5d41ec6cfab47e32164d5624269b1-Paper.pdf
+from typing import Tuple
 
 import numpy as np
 import torch
@@ -62,10 +63,10 @@ class FourierUnit(nn.Module):
 
         # squeeze and excitation block
         self.use_se = use_se
-        if use_se:
-            if se_kwargs is None:
-                se_kwargs = {}
-            self.se = SELayer(self.conv_layer.in_channels, **se_kwargs)
+        # if use_se:
+        #     if se_kwargs is None:
+        #         se_kwargs = {}
+        #     self.se = SELayer(self.conv_layer.in_channels, **se_kwargs)
 
         self.spatial_scale_factor = spatial_scale_factor
         self.spatial_scale_mode = spatial_scale_mode
@@ -82,7 +83,7 @@ class FourierUnit(nn.Module):
 
         r_size = x.size()
         # (batch, c, h, w/2+1, 2)
-        fft_dim = (-3, -2, -1) if self.ffc3d else (-2, -1)
+        fft_dim = (-2, -1)
         ffted = torch.fft.rfftn(x, dim=fft_dim, norm=self.fft_norm)
         ffted = torch.stack((ffted.real, ffted.imag), dim=-1)
         ffted = ffted.permute(0, 1, 4, 2, 3).contiguous()  # (batch, c, 2, h, w/2+1)
@@ -94,8 +95,8 @@ class FourierUnit(nn.Module):
             coords_hor = torch.linspace(0, 1, width)[None, None, None, :].expand(batch, 1, height, width).to(ffted)
             ffted = torch.cat((coords_vert, coords_hor, ffted), dim=1)
 
-        if self.use_se:
-            ffted = self.se(ffted)
+        # if self.use_se:
+        #     ffted = self.se(ffted)
 
         ffted = self.conv_layer(ffted)  # (batch, c*2, h, w/2+1)
         ffted = self.relu(self.bn(ffted))
@@ -104,7 +105,7 @@ class FourierUnit(nn.Module):
             0, 1, 3, 4, 2).contiguous()  # (batch,c, t, h, w/2+1, 2)
         ffted = torch.complex(ffted[..., 0], ffted[..., 1])
 
-        ifft_shape_slice = x.shape[-3:] if self.ffc3d else x.shape[-2:]
+        ifft_shape_slice = x.shape[-2:]
         output = torch.fft.irfftn(ffted, s=ifft_shape_slice, dim=fft_dim, norm=self.fft_norm)
 
         if self.spatial_scale_factor is not None:
@@ -133,9 +134,8 @@ class SpectralTransform(nn.Module):
         )
         self.fu = FourierUnit(
             out_channels // 2, out_channels // 2, groups, **fu_kwargs)
-        if self.enable_lfu:
-            self.lfu = FourierUnit(
-                out_channels // 2, out_channels // 2, groups)
+        self.lfu = FourierUnit(
+            out_channels // 2, out_channels // 2, groups)
         self.conv2 = torch.nn.Conv2d(
             out_channels // 2, out_channels, kernel_size=1, groups=groups, bias=False)
 
@@ -156,7 +156,7 @@ class SpectralTransform(nn.Module):
             xs = self.lfu(xs)
             xs = xs.repeat(1, 1, split_no, split_no).contiguous()
         else:
-            xs = 0
+            xs = torch.tensor(0)
 
         output = self.conv2(x + output + xs)
 
@@ -202,20 +202,20 @@ class FFC(nn.Module):
         module = nn.Identity if in_cg == 0 or out_cl == 0 or not self.gated else nn.Conv2d
         self.gate = module(in_channels, 2, 1)
 
-    def forward(self, x):
-        x_l, x_g = x if type(x) is tuple else (x, 0)
-        out_xl, out_xg = 0, 0
+    def forward(self, x: Tuple[torch.Tensor, torch.Tensor]):
+        x_l, x_g = x if isinstance(x, tuple) else (x, torch.tensor(0))
+        out_xl, out_xg = torch.tensor(0), torch.tensor(0)
 
         if self.gated:
             total_input_parts = [x_l]
-            if torch.is_tensor(x_g):
+            if isinstance(x_g, torch.Tensor):
                 total_input_parts.append(x_g)
             total_input = torch.cat(total_input_parts, dim=1)
 
             gates = torch.sigmoid(self.gate(total_input))
             g2l_gate, l2g_gate = gates.chunk(2, dim=1)
         else:
-            g2l_gate, l2g_gate = 1, 1
+            g2l_gate, l2g_gate = torch.tensor(1), torch.tensor(1)
 
         if self.ratio_gout != 1:
             out_xl = self.convl2l(x_l) + self.convg2l(x_g) * g2l_gate
@@ -248,7 +248,7 @@ class FFC_BN_ACT(nn.Module):
         self.act_l = lact(inplace=True)
         self.act_g = gact(inplace=True)
 
-    def forward(self, x):
+    def forward(self, x: Tuple[torch.Tensor, torch.Tensor]):
         x_l, x_g = self.ffc(x)
         x_l = self.act_l(self.bn_l(x_l))
         x_g = self.act_g(self.bn_g(x_g))
@@ -278,7 +278,7 @@ class FFCResnetBlock(nn.Module):
         if self.inline:
             x_l, x_g = x[:, :-self.conv1.ffc.global_in_num], x[:, -self.conv1.ffc.global_in_num:]
         else:
-            x_l, x_g = x if type(x) is tuple else (x, 0)
+            x_l, x_g = x if isinstance(x, tuple) else (x, torch.tensor(0))
 
         id_l, id_g = x_l, x_g
 
@@ -286,9 +286,9 @@ class FFCResnetBlock(nn.Module):
         x_l, x_g = self.conv2((x_l, x_g))
 
         x_l, x_g = id_l + x_l, id_g + x_g
-        out = x_l, x_g
-        if self.inline:
-            out = torch.cat(out, dim=1)
+        # out = x_l, x_g
+        # if self.inline:
+        out = torch.cat((x_l, x_g), dim=1)
         return out
 
 
